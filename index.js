@@ -4,6 +4,8 @@
 const { Command }  = require('commander');
 const readline     = require('readline');
 const { execSync } = require('child_process');
+const fs           = require('fs');
+const path         = require('path');
 
 const { findPm2Binary, discoverAll }                     = require('./lib/discover');
 const { scanLibBuilds, scanWwwBuilds, scanDojoBuilds, scanSchedBuilds, formatBytes } = require('./lib/builds');
@@ -90,13 +92,28 @@ program
 
 program
   .command('prune')
-  .description('Delete unused build directories (no processes and no recent web hits)')
-  .option('--dry-run',     'Show what would be deleted without deleting anything')
-  .option('-y, --yes',     'Skip confirmation prompt')
-  .option('--days <n>',    'Apache log look-back window in days (0 = skip)', '30')
+  .description('Delete (or move) unused build directories')
+  .option('--dry-run',          'Show what would happen without doing anything')
+  .option('-y, --yes',          'Skip confirmation prompt')
+  .option('--days <n>',         'Apache log look-back window in days (0 = skip)', '30')
+  .option('--move-to <dir>',    'Move directories to <dir> instead of deleting them')
   .action(async opts => {
     checkRoot();
     const apacheDays = parseInt(opts.days, 10) || 0;
+    const moveTo     = opts.moveTo || null;
+
+    // Validate --move-to destination up front
+    if (moveTo) {
+      if (!fs.existsSync(moveTo)) {
+        console.error(`Error: --move-to destination does not exist: ${moveTo}`);
+        process.exit(1);
+      }
+      if (!fs.statSync(moveTo).isDirectory()) {
+        console.error(`Error: --move-to destination is not a directory: ${moveTo}`);
+        process.exit(1);
+      }
+    }
+
     const { pm2, tmux, libBuilds, wwwBuilds, dojoBuilds, schedBuilds, apacheHits } =
       gatherData({ withSizes: true, apacheDays });
     const { unusedLib, unusedWww, unusedDojo, unusedSched } =
@@ -111,54 +128,68 @@ program
     ])];
 
     for (const version of versions) {
-      const lib   = unusedLib.find(b => b.version === version);
-      const www   = unusedWww.find(b => b.version === version);
-      const dojos = unusedDojo.filter(b => b.version === version);
+      const lib    = unusedLib.find(b => b.version === version);
+      const www    = unusedWww.find(b => b.version === version);
+      const dojos  = unusedDojo.filter(b => b.version === version);
       const scheds = unusedSched.filter(b => b.version === version);
-      if (lib)  targets.push({ path: lib.path,  sizeBytes: lib.sizeBytes,  label: `lib/${version}` });
-      if (www)  targets.push({ path: www.path,  sizeBytes: www.sizeBytes,  label: `www/${www.dirName}` });
-      for (const d of dojos)  targets.push({ path: d.path, sizeBytes: d.sizeBytes, label: `www/${d.dirName}` });
-      for (const s of scheds) targets.push({ path: s.path, sizeBytes: s.sizeBytes, label: `www/${s.dirName}` });
+      if (lib)  targets.push({ path: lib.path,  sizeBytes: lib.sizeBytes });
+      if (www)  targets.push({ path: www.path,  sizeBytes: www.sizeBytes });
+      for (const d of dojos)  targets.push({ path: d.path, sizeBytes: d.sizeBytes });
+      for (const s of scheds) targets.push({ path: s.path, sizeBytes: s.sizeBytes });
     }
 
     if (targets.length === 0) {
-      console.log('No unused builds to delete.');
+      console.log('No unused builds found.');
       return;
     }
 
     const totalBytes = targets.reduce((s, t) => s + (t.sizeBytes || 0), 0);
-    console.log('\nBuilds to delete:');
+    const action     = moveTo ? `Move to ${moveTo}` : 'Delete';
+    console.log(`\nBuilds to ${moveTo ? 'move' : 'delete'}:`);
     for (const t of targets) {
-      console.log(`  ${t.path}  (${formatBytes(t.sizeBytes)})`);
+      const dest = moveTo ? ` → ${path.join(moveTo, path.basename(t.path))}` : '';
+      console.log(`  ${t.path}  (${formatBytes(t.sizeBytes)})${dest}`);
     }
     console.log(`\nTotal: ${formatBytes(totalBytes)}\n`);
 
     if (opts.dryRun) {
-      console.log('Dry run — nothing deleted.');
+      console.log(`Dry run — nothing ${moveTo ? 'moved' : 'deleted'}.`);
       return;
     }
 
     if (!opts.yes) {
-      const answer = await prompt('Delete all of the above? [y/N] ');
+      const answer = await prompt(`${action} all of the above? [y/N] `);
       if (answer !== 'y' && answer !== 'yes') {
         console.log('Aborted.');
         return;
       }
     }
 
-    let deleted = 0;
+    let done = 0;
     for (const t of targets) {
-      process.stdout.write(`  Deleting ${t.path} ...`);
-      try {
-        execSync(`rm -rf ${JSON.stringify(t.path)}`);
-        process.stdout.write(' done\n');
-        deleted++;
-      } catch (e) {
-        process.stdout.write(` FAILED: ${e.message}\n`);
+      if (moveTo) {
+        const dest = path.join(moveTo, path.basename(t.path));
+        process.stdout.write(`  Moving ${t.path} → ${dest} ...`);
+        try {
+          execSync(`mv ${JSON.stringify(t.path)} ${JSON.stringify(dest)}`);
+          process.stdout.write(' done\n');
+          done++;
+        } catch (e) {
+          process.stdout.write(` FAILED: ${e.message}\n`);
+        }
+      } else {
+        process.stdout.write(`  Deleting ${t.path} ...`);
+        try {
+          execSync(`rm -rf ${JSON.stringify(t.path)}`);
+          process.stdout.write(' done\n');
+          done++;
+        } catch (e) {
+          process.stdout.write(` FAILED: ${e.message}\n`);
+        }
       }
     }
 
-    console.log(`\nDeleted ${deleted} of ${targets.length} directories.`);
+    console.log(`\n${moveTo ? 'Moved' : 'Deleted'} ${done} of ${targets.length} directories.`);
   });
 
 program.parse(process.argv);
