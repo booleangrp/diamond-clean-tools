@@ -6,7 +6,7 @@ const readline     = require('readline');
 const { execSync } = require('child_process');
 
 const { findPm2Binary, discoverAll }                     = require('./lib/discover');
-const { scanLibBuilds, scanWwwBuilds, formatBytes }      = require('./lib/builds');
+const { scanLibBuilds, scanWwwBuilds, scanDojoBuilds, formatBytes } = require('./lib/builds');
 const { printStatus, printCleanup, getUnusedBuilds }     = require('./lib/display');
 const { scanApacheLogs }                                 = require('./lib/apache');
 
@@ -29,6 +29,7 @@ function gatherData({ withSizes = true, apacheDays = 30 } = {}) {
   const { pm2, tmux } = discoverAll(pm2Binary);
   const libBuilds     = scanLibBuilds(withSizes);
   const wwwBuilds     = scanWwwBuilds(withSizes);
+  const dojoBuilds    = scanDojoBuilds(withSizes);
 
   if (withSizes) process.stderr.write('                              \r');
 
@@ -36,7 +37,7 @@ function gatherData({ withSizes = true, apacheDays = 30 } = {}) {
   const apacheHits = scanApacheLogs(apacheDays);
   if (apacheDays > 0) process.stderr.write('                              \r');
 
-  return { pm2, tmux, libBuilds, wwwBuilds, apacheHits };
+  return { pm2, tmux, libBuilds, wwwBuilds, dojoBuilds, apacheHits };
 }
 
 function prompt(question) {
@@ -64,9 +65,9 @@ program
   .action(opts => {
     checkRoot();
     const apacheDays = parseInt(opts.days, 10) || 0;
-    const { pm2, tmux, libBuilds, wwwBuilds, apacheHits } =
+    const { pm2, tmux, libBuilds, wwwBuilds, dojoBuilds, apacheHits } =
       gatherData({ withSizes: opts.sizes !== false, apacheDays });
-    printStatus(libBuilds, wwwBuilds, pm2, tmux, apacheHits);
+    printStatus(libBuilds, wwwBuilds, dojoBuilds, pm2, tmux, apacheHits);
   });
 
 // ── cleanup ──────────────────────────────────────────────────────────────────
@@ -79,9 +80,9 @@ program
   .action(opts => {
     checkRoot();
     const apacheDays = parseInt(opts.days, 10) || 0;
-    const { pm2, tmux, libBuilds, wwwBuilds, apacheHits } =
+    const { pm2, tmux, libBuilds, wwwBuilds, dojoBuilds, apacheHits } =
       gatherData({ withSizes: opts.sizes !== false, apacheDays });
-    printCleanup(libBuilds, wwwBuilds, pm2, tmux, apacheHits);
+    printCleanup(libBuilds, wwwBuilds, dojoBuilds, pm2, tmux, apacheHits);
   });
 
 // ── prune ────────────────────────────────────────────────────────────────────
@@ -95,21 +96,24 @@ program
   .action(async opts => {
     checkRoot();
     const apacheDays = parseInt(opts.days, 10) || 0;
-    const { pm2, tmux, libBuilds, wwwBuilds, apacheHits } =
+    const { pm2, tmux, libBuilds, wwwBuilds, dojoBuilds, apacheHits } =
       gatherData({ withSizes: true, apacheDays });
-    const { unusedLib, unusedWww } = getUnusedBuilds(libBuilds, wwwBuilds, pm2, tmux, apacheHits);
+    const { unusedLib, unusedWww, unusedDojo } = getUnusedBuilds(libBuilds, wwwBuilds, dojoBuilds, pm2, tmux, apacheHits);
 
     const targets = [];
     const versions = [...new Set([
       ...unusedLib.map(b => b.version),
       ...unusedWww.map(b => b.version),
+      ...unusedDojo.map(b => b.version),
     ])];
 
     for (const version of versions) {
-      const lib = unusedLib.find(b => b.version === version);
-      const www = unusedWww.find(b => b.version === version);
-      if (lib) targets.push({ path: lib.path, sizeBytes: lib.sizeBytes, label: `lib/${version}` });
-      if (www) targets.push({ path: www.path, sizeBytes: www.sizeBytes, label: `www/${www.dirName || version}` });
+      const lib  = unusedLib.find(b => b.version === version);
+      const www  = unusedWww.find(b => b.version === version);
+      const dojo = unusedDojo.filter(b => b.version === version);
+      if (lib)  targets.push({ path: lib.path,  sizeBytes: lib.sizeBytes,  label: `lib/${version}` });
+      if (www)  targets.push({ path: www.path,  sizeBytes: www.sizeBytes,  label: `www/${www.dirName}` });
+      for (const d of dojo) targets.push({ path: d.path, sizeBytes: d.sizeBytes, label: `www/${d.dirName}` });
     }
 
     if (targets.length === 0) {
